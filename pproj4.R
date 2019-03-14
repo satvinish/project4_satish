@@ -165,8 +165,7 @@ set.seed(1)
 library(randomForest)
 a.cancerTrain<-randomForest(diagnosis~.,cancerTrain,
                                          subset = train_proj,mtry = 3,importance = TRUE)
-rf.Carseats<-randomForest(High~. -Sales,Carseats,subset = train,mtry = 3,importance = TRUE)
-dim(Carseats)
+dim(a.cancerTrain)
 importance(a.cancerTrain)
 
 varImpPlot(a.cancerTrain,col = 'blue',pch = 10, cex = 1.25)
