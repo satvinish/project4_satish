@@ -1,180 +1,247 @@
 ## Import data 
 ## by setting Working directory
 setwd("C:/Users/satish/Desktop")
-cancerTrain <- read.csv("CancerData.csv", na.strings = c(""," ","NA"))     
+CancerData<- read.csv("CancerData.csv", na.strings = c(""," ","NA"))   
+View(CancerData)
+Summary(CancerData)
+dim(CancerData) 
+names(CancerData) 
+CancerData$diagnosis <- factor(CancerData$diagnosis, levels = c("B", "M"),labels = c("Benign", "Malignant")) 
+
+#Library
+library(mice) 
+library(readr,dplyr)
+library("ggplot2")
+library("corrplot")
+library("gridExtra")
+library("pROC") 
+library("MASS")
+library("caTools") 
+library("caret") 
+library(randomForest) 
+library(rpart)
+library(rpart.plot) 
+library(rattle) 
+data<- CancerData
+library(Amelia)
+str(data)
+any(is.na(data)) 
+missmap(CancerData, main="Missing Data Map", col=c("#FF4081", "#3F51B5"), legend=FALSE) 
+data<- CancerData
+data[,33]<-NULL 
+barplot(table(data$diagnosis), xlab = "Type of tumor", ylab="Numbers per type") 
 
 ############################## Missing Values #########################
 ## Visualize Na terms
-library(Amelia)
-missmap(cancerTrain)
-sapply(cancerTrain,function(x) sum(is.na(x)))
+missmap(data,col=c("yellow","red")) 
+data$diagnosis<-as.factor(data$diagnosis) 
+data[,33]<-NULL
+summary(data) 
+qplot(radius_mean, data=data, colour=diagnosis, geom="density", Main="Radius mean for each tumor type") 
+qplot(smoothness_mean, data=data, colour=diagnosis, geom="density", main="Smoothness mean for each tumor type") 
+qplot(concavity_mean, data=data, colour=diagnosis, geom="density", main="Concavity mean for each tumor type") 
+qplot(area_worst , data=data, colour=diagnosis, geom="density", main="area worst for each tumor type") 
 
-#### Delete Obervations with NA values
-compTrain <- na.omit(cancerTrain)
+# Looking at distribution for area.mean variable 
+plot.new() 
+hist(CancerData$area_mean, main = 'Distribution of Cell Area Means', xlab = 'Mean Area', col = 'green') 
 
-#### Impute mean/median/mode 
-library(ggplot2)
+#to find that the data is imbalanced and also there is a lot of corelation between the attributes 
+prop.table(table(data$diagnosis)) 
+corr_mat<-cor(data[,3:ncol(data)])
+corrplot(corr_mat) 
+plot.new() 
+plot(data$area_mean ~data$concavity_mean) 
+title('Basic Scatterplot')  
+ggplot(data, aes(x=data$area_worst)) + geom_histogram(binwidth = 1, fill = "yellow", color = "black") 
+ggplot(data, aes(x=data$area_mean)) + geom_histogram(binwidth = 1, fill = "green", color = "red") 
 
-#### CancerData
-ggplot(cancerTrain, aes(1, diagnosis)) + geom_boxplot()
-cancerTrain$diagnosis<- as.integer(cancerTrain$diagnosis)
-hist(cancerTrain$diagnosis)
-# Impute by Median
-cancerTrain$diagnosis[is.na(cancerTrain$diagnosis)]<-
-  median(cancerTrain$diagnosis, na.rm = T)
+#Modelling 
+#We are going to get a training and a testing set to use when building some models: 
+set.seed(1234)
+data_index<-createDataPartition(data$diagnosis,p=0.75,list = FALSE)
+train_data<-data[data_index,-1] 
+test_data<-data[data_index,-1] 
+fitControl <- trainControl(method="cv", 
+                           number = 5,
+                           preProcOptions = list(thresh = 0.99), # threshold for pca preprocess 
+                           classProbs =  TRUE, 
+                           summaryFunction = twoClassSummary) 
+                           
+#Model1: Random Forest 
+#Building the model on the training data 
+model_rf <- train(diagnosis~., 
+                  train_data, 
+                  method="ranger", 
+                  metric="ROC", #tuneLength=10, #tuneGrid = expand.grid(mtry = c(2, 3, 6)),
+                  preProcess = c('center', 'scale'),
+                  trControl=fitControl) 
 
-## Mice Package
-library(mice)
-l<-cancerTrain[,c(2:32)]
-imputed_Data <- mice(l, m=5, maxit = 50, method = 'pmm', seed = 500)
+#Testing on the testing data ## testing for random forets 
+pred_rf <- predict(model_rf, test_data) cm_rf <- confusionMatrix(pred_rf, test_data$diagnosis, positive = "M") cm_rf 
 
-############################# Outliers Treatment ###################
-## diagnosis Variable
-library(ggplot2)
-ggplot(l, aes(1,diagnosis)) + geom_boxplot(outlier.colour = "red",
-                                            outlier.shape = 2)
-## Labeling Outliers 
-is_outlier <- function(x) {
-  return(x < quantile(x, 0.25) - 1.5 * IQR(x) | x > quantile(x, 0.75) + 1.5 * IQR(x))
-}
+# We find the accuracy of the model is 100% 
+#Random forest model- takes decision trees and averages them 
+normalize<-function(x){return((x-min(x))/(max(x)-min(x)))} 
+data$diagnosis<-as.numeric(data$diagnosis)
+data_n<-as.data.frame(lapply(data,normalize))
+traindata_n<--data_n[1:426,]
+testdata_n<-data_n[427:569,]
+rf <- randomForest(diagnosis ~., data= traindata_n, ntree =300, mtry = 5, importance = TRUE) 
+print(rf) 
+plot.new() 
+varImpPlot(rf, type = 1, pch =8, col = 2, cex =0.8, main = "cancerdata")
+abline(v= 45, col= "red") 
+library(party) 
+library(Boruta) 
 
-library(dplyr)
-l %>%
-  mutate(outlier = ifelse(is_outlier(diagnosis), diagnosis, as.numeric(NA))) %>%
-  ggplot(.,aes(1,diagnosis)) + geom_boxplot(fill = "steelblue",outlier.colour = "red",
-                                             outlier.shape = 2)+
-  geom_text(aes(label = outlier), na.rm = TRUE, hjust = -0.3)
+# Decide if a variable is important or not using Boruta 
+boruta_output <- Boruta( diagnosis~ ., data=na.omit(train_data), doTrace=2) 
 
-## diagnosis
-boxplot(l$diagnosis)
-ggplot(l, aes(1,diagnosis)) + geom_boxplot(outlier.colour = "red",outlier.shape = 2)
-qnt <- quantile(l$diagnosis, 0.75, na.rm = T)
-caps <- quantile(l$diagnosis, 0.95, na.rm = T)
-H <- 1.5 * IQR(l$diagnosis, na.rm = T)
-l$diagnosis[l$diagnosis > (qnt +  H)] <- caps
+# perform Boruta search
+boruta_signif <- names(boruta_output$finalDecision[boruta_output$finalDecision %in% c("Confirmed", "Tentative")]) 
+boruta_signif 
 
-## relationship among various features
-contVars<-c("radius_mean","texture_mean","perimeter_mean","area_mean","smoothness_mean","compactness_mean","concavity_mean","concave points_mean",
-"symmetry_mean","fractal_dimension_mean","radius_se","texture_se","perimeter_se","area_se","smoothness_se","compactness_se","concavity_se",
-"concave points_se","symmetry_se","fractal_dimension_se","radius_worst","texture_worst","perimeter_worst","area_worst","smoothness_worst",
-"compactness_worst","concavity_worst","concave points_worst","symmetry_worst","fractal_dimension_worst")
-cont_df<-l[,names(l) %in% contVars]
+#Model2: Naive Bayes
+#Building and testing the model 
+model_nb <- train(diagnosis~., train_data, method="nb", metric="ROC", preProcess=c('center', 'scale'), trace=FALSE, trControl=fitControl) 
+cm_nb <- confusionMatrix(pred_nb, test_data$diagnosis, positive = "M") 
+cm_nb 
 
-## Scatter plot
-pairs(cont_df)
-library(corrplot)
-corrplot(cor(cont_df), type = "full", "ellipse")
+#Accuracy of the model is 93.9% 
+#Model3: glm
+#Building and testing the model
+model_glm <- train(diagnosis~., train_data, method="glm", metric="ROC", preProcess=c('center', 'scale'), trace=FALSE, trControl=fitControl) 
 
-# 
-ggplot(l, aes(radius_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(texture_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(perimeter_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(area_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(smoothness_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(compactness_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(concavity_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(concave_points_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(symmetry_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(fractal_dimension_mean , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(radius_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(texture_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(perimeter_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(area_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(smoothness_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(compactness_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(concavity_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(concave_points_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(symmetry_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(fractal_dimension_se , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(radius_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(texture_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(perimeter_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(area_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(smoothness_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(compactness_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(concavity_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(concave_points_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(symmetry_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
-ggplot(l, aes(fractal_dimension_worst , diagnosis)) + geom_boxplot(fill = "steelblue")
+## predicting for test data 
+pred_glm <- predict(model_glm, test_data) cm_glm <- confusionMatrix(pred_glm, test_data$diagnosis, positive = "M") 
+cm_glm 
 
-### Data Modelling
+#Accuracy of the model is 98.3 % 
+#algorithm for decision tree 
+library(C50)
+data$diagnosis<-as.factor(data$diagnosis)
+tree <- C5.0( diagnosis~., data = data)
+summary(tree) 
+plot.new() 
+plot(tree) 
+results <- C5.0(diagnosis ~., data = data, rules = TRUE)
+summary(results) 
+data<-as.data.frame(data)
+library(rpart) 
+tree<-rpart(diagnosis~.,data =train_data,method="class") 
+plot.new() 
+text(tree, pretty=0) 
+library(rattle)
+library(rpart.plot)
+library(RColorBrewer)
+plot.new() 
+fancyRpartPlot(tree)
+plot.new() 
+printcp(tree) 
+plotcp(tree) 
+ptree<- prune(tree, cp= tree$cptable[which.min(tree$cptable[,"xerror"]),"CP"]) 
+plot.new() 
+fancyRpartPlot(ptree, uniform=TRUE,main="Pruned Classification Tree") 
+library(rpart) 
+fit1 <- rpart(diagnosis~.,data=train_data)
+fit1 
+summary(fit1) 
 
-# creating train and test data
-str(cancerTrain)
-train_proj <- cancerTrain[1:455,] # creating train data
-test_proj <- cancerTrain[456:569,]# creating test data
+#Kernlab Classification
+require(kernlab) 
+installed.packages("kernlab") 
+library(kernlab) 
+data_classifier<-ksvm(diagnosis ~., data =train_data , kernel='vanilladot') 
+data_classifier 
+data_predictions<-predict(data_classifier,test_data)
+head(data_predictions)
+table(data_predictions, test_data$diagnosis) 
+agreement<-data_predictions == test_data$diagnosis 
+table(agreement)
+prop.table(table(agreement)) 
+Agreement
+set.seed(12345) 
+data_classifier_rbf<- ksvm(diagnosis ~., data = train_data, kernel='rbfdot')
+data_predictions_rbf<- predict(data_classifier_rbf,test_data )
+agreement_rbf<-data_predictions_rbf == test_data$diagnosis
+table(agreement_rbf)
+prop.table(table(agreement_rbf))  
 
-# removing Loan ID from  train and test data
-train_proj <- subset(train_proj,select = -c(id))
-test_proj <- subset(test_proj,select = -c(id))
+# logistic regression model: 
+fit <- glm(diagnosis~.,data = train_data,family = binomial(link='logit')) 
+summary(fit) 
+library(MASS) 
+step_fit <- stepAIC(fit,method='backward') 
+summary(step_fit) 
+confint(step_fit) 
 
-## Logistic Regression
-str(train_proj)
-logistic<- glm(diagnosis~radius_mean+texture_mean+perimeter_mean+area_mean+smoothness_mean+compactness_mean+concavity_mean+concave.points_mean+ 
-              symmetry_mean+fractal_dimension_mean+radius_se+texture_se+perimeter_se+area_se+smoothness_se+compactness_se+concavity_se+      
-              concave.points_se+symmetry_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+
-              compactness_worst+concavity_worst+concave.points_worst+symmetry_worst+fractal_dimension_worst, data = train_proj)
-summary(logistic)
+#ANOVA on base model 
+anova(fit,test = 'Chisq') 
 
-logistic1<- glm(diagnosis~radius_mean+texture_mean+perimeter_mean+area_mean+smoothness_mean+compactness_mean+concavity_mean+concave.points_mean+ 
-                 symmetry_mean+fractal_dimension_mean+radius_se+texture_se+perimeter_se+area_se+smoothness_se+compactness_se+concavity_se+      
-                 concave.points_se+symmetry_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+
-                 compactness_worst+concavity_worst+concave.points_worst+symmetry_worst+fractal_dimension_worst, data = test_proj)
-summary(logistic1)
+#ANOVA from reduced model after applying the Step AIC 
+anova(step_fit,test = 'Chisq') 
 
-# prediction #   
+#plot the fitted model 
+plot.new() 
+plot(fit$fitted.values) 
+pred_link <- predict(fit,newdata = test_data,type = 'link') 
 
-predict<- predict(logistic, type = "response")
-head(predict, 3)
-train_proj$predict<- predict
-train_projRound<- round(predict, digits = 0)
-table(train_proj$diagnosis, predict >= 0.5)
+#check for multicollinearity
+library(car) 
+vif(fit) 
+vif(step_fit) 
+pred <- predict(fit,newdata =test_data ,type ='response') 
 
-confusionMatrix<- confusionMatrix(predict,train_proj$diagnosis)
-confusionMatrix
+#check the AUC curve 
+library(pROC)
+g <- roc(diagnosis ~ pred, data = test_data) 
+g
+plot.new() 
+plot(g) 
+library(caret)
 
-predict1<- predict(logistic1, type = "response")
-head(predict1, 3)
-test_proj$predict1<- predict1
-test_projRound<- round(predict1, digits = 0)
-table(test_proj$diagnosis, predict1 <= 0.5)
+#with default prob cut 0.50 
+test_data$pred_diagnosis <- ifelse(pred<0.5,'yes','no') 
+table(test_data$pred_diagnosis,test_data$diagnosis) 
 
-confusionMatrix<- confusionMatrix(predictions,test_proj$diagnosis)
-confusionMatrix(glm.predict, train_proj$diagnosis, positive = "Yes")
+#training split of diagnosis classes 
+round(table(train_data$diagnosis)/nrow(train_data),2)*100 
 
-confusionMatrix
+# test split of diagnosis 
+round(table(test_data$diagnosis)/nrow(test_data),2)*100 
 
-#ROC curve 
-library(ROCR)
-# need to create prediction object from ROCR
-pr <- prediction(diagnosis$predict, train_proj$diagnosis)
-pr <- train_proj$predict
+#predicted split of diagnosis
+round(table(test_data$pred_diagnosis))
 
-# plotting ROC curve
-prf <- performance(pr, measure = "tpr", x.measure = "fpr")
-plot(prf)
+#create confusion matrix
+#confusionMatrix(test_data$diagnosis,test_data$pred_diagnosis)
+#how do we create a cross validation scheme 
+control <- trainControl(method = 'repeatedcv', number = 10, repeats = 3) 
+seed <-7 
+metric <- 'Accuracy' 
+set.seed(seed) 
+fit_default <- train(diagnosis~., data = train_data, method = 'glm', metric =metric , trControl = control) 
+print(fit_default) 
+library(caret)
+varImp(step_fit) 
+varImp(fit_default) 
+library(woe) 
+library(riv) 
+train_data<-as.data.frame(train_data) 
+iv_df <- iv.mult(train_data, y="diagnosis", summary=TRUE, verbose=TRUE) 
+iv_df 
+iv <- iv.mult(train_data, y="diagnosis", summary=FALSE, verbose=TRUE)
 
-# AUC value
-auc <- performance(pr, measure = "auc")
-auc <- auc@y.values[[1]]
-auc
+# Plot information value summary 
+iv.plot.summary(iv_df)    
 
-#............Random forest.........
-
-set.seed(1)
-library(randomForest)
-a.cancerTrain<-randomForest(diagnosis~.,cancerTrain,
-                                         subset = train_proj,mtry = 3,importance = TRUE)
-dim(a.cancerTrain)
-importance(a.cancerTrain)
-
-varImpPlot(a.cancerTrain,col = 'blue',pch = 10, cex = 1.25)
-
-a.cancerTrain
-
-test.pred.rf<-predict(a.cancerTrain, newdata = cancerTrain[-train_proj,],type = 'class')
-table(test.pred.rf,test_proj)
-
-
-  
-  
+#4. MARS (earth package) 
+#The earth package implements variable importance based on Generalized cross validation (GCV), 
+#number of subset models the variable occurs (nsubsets) and residual sum of squares (RSS). 
+library(earth)
+marsModel<-earth(diagnosis~ ., data=data) # build model 
+ev <- evimp (marsModel) # estimate variable importance 
+ev 
+plot.new() 
+plot (ev) 
